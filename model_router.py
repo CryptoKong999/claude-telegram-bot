@@ -18,6 +18,8 @@ SONNET_TRIGGERS = {
     "коммерческ", "commercial", "предложени", "proposal", "контракт",
     "договор", "клиент", "client", "спонсор", "sponsor",
     "план", "plan", "анализ", "analysis", "отчёт", "report",
+    "оплат", "заплатил", "получил", "выручк", "доход", "money",
+    "revenue", "payment", "$", "долл", "сум",
     # Creative / long form
     "сценарий", "script", "напиши текст", "write", "статья", "article",
     "пост", "контент", "content",

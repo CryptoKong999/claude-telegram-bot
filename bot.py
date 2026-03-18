@@ -144,10 +144,12 @@ async def cmd_start(message: Message):
         "/project — сменить системный промпт\n"
         "/history — список диалогов\n"
         "/usage — статистика расходов\n"
+        "/money — выручка и цели\n"
         "/status — текущие настройки\n"
         "/search on|off — веб-поиск\n"
         "/n8n [запрос] — управление n8n воркфлоу\n"
-        "/help — эта справка",
+        "/help — эта справка\n\n"
+        "💰 Логирование оплат: просто напиши 'HONOR $3000' или 'Pepsi 2000 долларов'",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -347,6 +349,26 @@ async def cmd_usage(message: Message):
         f"  Запросов: {stats['total_requests']}",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+@router.message(Command("money"))
+async def cmd_money(message: Message):
+    """Show revenue progress and goals."""
+    if not is_owner(message):
+        return
+    import revenue
+    text = await revenue.build_goals_message()
+    await send_long_message(message, text)
+
+
+@router.message(Command("goals"))
+async def cmd_goals(message: Message):
+    """Alias for /money."""
+    if not is_owner(message):
+        return
+    import revenue
+    text = await revenue.build_goals_message()
+    await send_long_message(message, text)
 
 
 @router.message(Command("history"))
@@ -587,6 +609,13 @@ async def context_sync_cron():
 async def main():
     logger.info("Initializing database...")
     await db.init_db()
+
+    # Init revenue tracking tables
+    try:
+        import revenue
+        await revenue.init_revenue_tables()
+    except Exception as e:
+        logger.warning(f"Revenue tables init failed (non-critical): {e}")
 
     # Initial context sync
     try:
