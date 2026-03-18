@@ -613,7 +613,7 @@ async def main():
     # Init revenue tracking tables
     try:
         import revenue
-        await revenue.init_revenue_tables()
+        await revenue.init_tables()
     except Exception as e:
         logger.warning(f"Revenue tables init failed (non-critical): {e}")
 

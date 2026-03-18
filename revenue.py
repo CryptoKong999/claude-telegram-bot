@@ -1,237 +1,414 @@
 """
-Revenue tracker — logs payments, tracks goals, generates progress bars.
-No AI guessing. Only real data you enter.
-
-Usage in Telegram:
-  "HONOR заплатили $3000"
-  "ЖК Башкент наличка 5M сум"
-  "/money" — текущий прогресс
-  "/goals" — цели и прогресс-бары
+Revenue & Goals tracker.
+- Log payments via natural language
+- Track progress toward personal goals  
+- Generate motivational digest section
+- Follow-up tracking
 """
 
 import json
 import logging
 from datetime import datetime, date, timedelta
-from typing import Optional
 
-from sqlalchemy import (
-    Column, Integer, String, Text, Float, Date, DateTime, Boolean,
-    select, func, extract
-)
-from sqlalchemy.ext.asyncio import AsyncSession
-
-import database as db
+import asyncpg
+import config
 
 logger = logging.getLogger(__name__)
 
-
-# ──────────────────── DB Models ───────────────────────
-
-class Revenue(db.Base):
-    __tablename__ = "revenue_entries"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    amount_usd = Column(Float, nullable=False)
-    client = Column(String(200), nullable=False)
-    description = Column(Text, default="")
-    date = Column(Date, default=date.today)
-    created_at = Column(DateTime, default=datetime.utcnow)
+# ═══ Personal goals — the WHY ═══
+GOALS_2026 = [
+    {"name": "🎹 Пианино", "target": 1000, "priority": 1},
+    {"name": "🛋 Диван", "target": 1000, "priority": 2},
+    {"name": "📱 iPhone", "target": 2000, "priority": 3},
+    {"name": "💻 MacBook M6", "target": 3500, "priority": 4},
+    {"name": "🇨🇳 Китай", "target": 2000, "priority": 5},
+]
+MONTHLY_TARGET = 10000
 
 
-class PersonalGoal(db.Base):
-    __tablename__ = "personal_goals"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(200), nullable=False)
-    emoji = Column(String(10), default="🎯")
-    target_usd = Column(Float, nullable=False)
-    priority = Column(Integer, default=1)  # 1 = first to fill
-    is_achieved = Column(Boolean, default=False)
-
-
-# ──────────────────── Constants ───────────────────────
-
-# Robert's 2026 goals — seeded on first run
-DEFAULT_GOALS = [
-    {"name": "MacBook Pro M6", "emoji": "💻", "target_usd": 3500, "priority": 1},
-    {"name": "iPhone", "emoji": "📱", "target_usd": 2000, "priority": 2},
-    {"name": "Пианино", "emoji": "🎹", "target_usd": 1000, "priority": 3},
-    {"name": "Диван", "emoji": "🛋", "target_usd": 1000, "priority": 4},
+# ═══ Tool definitions for Claude ═══
+REVENUE_TOOLS = [
+    {
+        "name": "revenue_log_payment",
+        "description": (
+            "Log a payment/revenue received. Use when user says things like "
+            "'HONOR заплатили $3000', 'получили оплату', 'пришли деньги'. "
+            "Extract client name, amount, and description."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "client": {"type": "string", "description": "Client/company name"},
+                "amount": {"type": "number", "description": "Amount in USD"},
+                "description": {"type": "string", "description": "Brief description", "default": ""},
+            },
+            "required": ["client", "amount"],
+        },
+    },
+    {
+        "name": "revenue_stats",
+        "description": (
+            "Show revenue stats, goal progress, financial overview. "
+            "Use when user asks about money, revenue, goals, progress, P&L."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "revenue_add_follow_up",
+        "description": (
+            "Add a follow-up reminder for a potential deal. "
+            "Use when user mentions needing to follow up with someone about money."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contact": {"type": "string", "description": "Contact name"},
+                "handle": {"type": "string", "description": "Telegram @handle"},
+                "opportunity": {"type": "string", "description": "What the deal is about"},
+                "amount": {"type": "number", "description": "Potential amount in USD", "default": 0},
+            },
+            "required": ["contact", "opportunity"],
+        },
+    },
+    {
+        "name": "revenue_follow_ups",
+        "description": "Show pending follow-ups that need action today.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "revenue_follow_up_action",
+        "description": (
+            "Update a follow-up: mark as done, skip, reject, or paid. "
+            "done = contacted, will follow up in 3 days. "
+            "skip = not now, push to next week. "
+            "reject = not relevant, don't show again. "
+            "paid = deal closed, log the payment."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "follow_up_id": {"type": "integer"},
+                "action": {"type": "string", "enum": ["done", "skip", "reject", "paid"]},
+                "notes": {"type": "string", "default": ""},
+            },
+            "required": ["follow_up_id", "action"],
+        },
+    },
 ]
 
-SUM_RATE = 12000  # 12,000 сум = $1
-MONTHLY_EXPENSES = 1500  # $1,500/мес
+
+# ═══ DB helpers ═══
+
+async def _conn():
+    url = config.DATABASE_URL
+    if not url:
+        return None
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return await asyncpg.connect(url, timeout=10)
 
 
-# ──────────────────── Init ────────────────────────────
+async def init_tables():
+    conn = await _conn()
+    if not conn:
+        return
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS revenue_log (
+                id SERIAL PRIMARY KEY,
+                client TEXT NOT NULL,
+                amount FLOAT NOT NULL,
+                currency TEXT DEFAULT 'USD',
+                description TEXT,
+                date DATE DEFAULT CURRENT_DATE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS follow_up_actions (
+                id SERIAL PRIMARY KEY,
+                contact TEXT NOT NULL,
+                contact_handle TEXT,
+                opportunity TEXT,
+                potential_amount FLOAT DEFAULT 0,
+                last_interaction DATE,
+                next_follow_up DATE,
+                status TEXT DEFAULT 'pending',
+                notes TEXT,
+                times_skipped INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        logger.info("Revenue tables ready")
+    finally:
+        await conn.close()
 
-async def init_revenue_tables():
-    """Create tables and seed goals if needed."""
-    async with db.engine.begin() as conn:
-        await conn.run_sync(db.Base.metadata.create_all)
 
-    # Seed goals if empty
-    async with db.SessionLocal() as session:
-        result = await session.execute(select(func.count(PersonalGoal.id)))
-        count = result.scalar()
-        if count == 0:
-            for g in DEFAULT_GOALS:
-                session.add(PersonalGoal(**g))
-            await session.commit()
-            logger.info("Seeded personal goals")
+# ═══ Tool executors ═══
+
+async def execute_tool(name: str, inp: dict) -> str:
+    try:
+        if name == "revenue_log_payment":
+            return await _log_payment(inp)
+        elif name == "revenue_stats":
+            return await _get_stats()
+        elif name == "revenue_add_follow_up":
+            return await _add_follow_up(inp)
+        elif name == "revenue_follow_ups":
+            return await _get_follow_ups()
+        elif name == "revenue_follow_up_action":
+            return await _follow_up_action(inp)
+        return json.dumps({"error": f"Unknown: {name}"})
+    except Exception as e:
+        logger.error(f"Revenue tool error: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
 
-# ──────────────────── Revenue CRUD ────────────────────
-
-async def log_revenue(amount_usd: float, client: str, description: str = "") -> Revenue:
-    """Log a payment."""
-    async with db.SessionLocal() as session:
-        entry = Revenue(
-            amount_usd=amount_usd,
-            client=client,
-            description=description,
+async def _log_payment(inp: dict) -> str:
+    conn = await _conn()
+    if not conn:
+        return json.dumps({"error": "DB unavailable"})
+    try:
+        await conn.execute(
+            "INSERT INTO revenue_log (client, amount, description) VALUES ($1, $2, $3)",
+            inp["client"], inp["amount"], inp.get("description", "")
         )
-        session.add(entry)
-        await session.commit()
-        await session.refresh(entry)
-        return entry
-
-
-async def get_monthly_revenue(year: int = None, month: int = None) -> float:
-    """Get total revenue for a month."""
-    if not year:
-        year = date.today().year
-    if not month:
-        month = date.today().month
-
-    async with db.SessionLocal() as session:
-        result = await session.execute(
-            select(func.coalesce(func.sum(Revenue.amount_usd), 0))
-            .where(extract("year", Revenue.date) == year)
-            .where(extract("month", Revenue.date) == month)
+        month_start = date.today().replace(day=1)
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM revenue_log WHERE date >= $1",
+            month_start
         )
-        return result.scalar() or 0.0
+        monthly = float(row["total"])
 
-
-async def get_year_revenue(year: int = None) -> float:
-    """Get total revenue for a year."""
-    if not year:
-        year = date.today().year
-
-    async with db.SessionLocal() as session:
-        result = await session.execute(
-            select(func.coalesce(func.sum(Revenue.amount_usd), 0))
-            .where(extract("year", Revenue.date) == year)
+        # Find next goal
+        cumulative = 0
+        year_start = date.today().replace(month=1, day=1)
+        row2 = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM revenue_log WHERE date >= $1",
+            year_start
         )
-        return result.scalar() or 0.0
+        yearly = float(row2["total"])
+        savings = yearly * 0.3
+
+        next_goal = None
+        for g in sorted(GOALS_2026, key=lambda x: x["priority"]):
+            cumulative += g["target"]
+            if savings < cumulative:
+                next_goal = g
+                remaining = cumulative - savings
+                break
+
+        result = {
+            "logged": True,
+            "client": inp["client"],
+            "amount": inp["amount"],
+            "monthly_total": monthly,
+            "monthly_target": MONTHLY_TARGET,
+            "yearly_total": yearly,
+        }
+        if next_goal:
+            result["next_goal"] = next_goal["name"]
+            result["goal_remaining"] = round(remaining)
+
+        return json.dumps(result, ensure_ascii=False, default=str)
+    finally:
+        await conn.close()
 
 
-async def get_recent_entries(limit: int = 10) -> list[Revenue]:
-    """Get recent revenue entries."""
-    async with db.SessionLocal() as session:
-        result = await session.execute(
-            select(Revenue)
-            .order_by(Revenue.created_at.desc())
-            .limit(limit)
+async def _get_stats() -> str:
+    conn = await _conn()
+    if not conn:
+        return json.dumps({"error": "DB unavailable"})
+    try:
+        today = date.today()
+        month_start = today.replace(day=1)
+        year_start = today.replace(month=1, day=1)
+
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM revenue_log WHERE date >= $1", month_start
         )
-        return list(result.scalars())
+        monthly = float(row["total"])
 
-
-# ──────────────────── Goals ───────────────────────────
-
-async def get_goals() -> list[PersonalGoal]:
-    """Get all active goals sorted by priority."""
-    async with db.SessionLocal() as session:
-        result = await session.execute(
-            select(PersonalGoal)
-            .where(PersonalGoal.is_achieved == False)
-            .order_by(PersonalGoal.priority)
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount), 0) as total FROM revenue_log WHERE date >= $1", year_start
         )
-        return list(result.scalars())
+        yearly = float(row["total"])
+
+        recent = await conn.fetch(
+            "SELECT client, amount, description, date FROM revenue_log ORDER BY date DESC LIMIT 5"
+        )
+
+        # Goals
+        savings = yearly * 0.3
+        cumulative = 0
+        goals = []
+        for g in sorted(GOALS_2026, key=lambda x: x["priority"]):
+            cumulative += g["target"]
+            goals.append({
+                "name": g["name"],
+                "target": g["target"],
+                "achieved": savings >= cumulative,
+            })
+
+        # Pending follow-ups
+        fus = await conn.fetch("""
+            SELECT id, contact, contact_handle, opportunity, potential_amount
+            FROM follow_up_actions 
+            WHERE status = 'pending' AND next_follow_up <= CURRENT_DATE
+            ORDER BY potential_amount DESC NULLS LAST LIMIT 5
+        """)
+
+        return json.dumps({
+            "month": today.strftime("%B %Y"),
+            "monthly_revenue": monthly,
+            "monthly_target": MONTHLY_TARGET,
+            "yearly_revenue": yearly,
+            "savings_estimate": round(savings),
+            "recent_payments": [dict(r) for r in recent],
+            "goals": goals,
+            "pending_follow_ups": len(fus),
+        }, ensure_ascii=False, default=str)
+    finally:
+        await conn.close()
 
 
-# ──────────────────── Progress Bars ───────────────────
-
-def progress_bar(current: float, target: float, width: int = 12) -> str:
-    """Generate a visual progress bar."""
-    if target <= 0:
-        return "?" * width
-    ratio = min(current / target, 1.0)
-    filled = int(ratio * width)
-    empty = width - filled
-    bar = "█" * filled + "░" * empty
-    pct = int(ratio * 100)
-    return f"{bar} {pct}%"
-
-
-async def build_goals_message() -> str:
-    """Build the motivational goals display."""
-    year_revenue = await get_year_revenue()
-    month_revenue = await get_monthly_revenue()
-    goals = await get_goals()
-
-    today = date.today()
-    months_left = 12 - today.month + 1
-    year_expenses = MONTHLY_EXPENSES * (12 - today.month + 1)
-
-    # Available for goals = revenue - expenses
-    # For simplicity: track revenue directly toward goals
-    # Goals are filled in priority order
-    remaining = year_revenue
-    lines = []
-
-    for g in goals:
-        if remaining >= g.target_usd:
-            filled = g.target_usd
-            remaining -= g.target_usd
-        else:
-            filled = max(remaining, 0)
-            remaining = 0
-
-        bar = progress_bar(filled, g.target_usd)
-        lines.append(f"{g.emoji} {g.name}: {bar} (${filled:,.0f}/${g.target_usd:,.0f})")
-
-    # Monthly pace
-    if today.month > 1:
-        avg_monthly = year_revenue / today.month
-    else:
-        avg_monthly = month_revenue
-
-    pace_yearly = avg_monthly * 12
-    target_yearly = sum(g.target_usd for g in goals) + (MONTHLY_EXPENSES * 12)
-
-    text = f"📊 Выручка {today.year}\n\n"
-    text += f"Этот месяц: ${month_revenue:,.0f}\n"
-    text += f"За год: ${year_revenue:,.0f}\n"
-    text += f"Темп: ${avg_monthly:,.0f}/мес\n\n"
-    text += "🎯 Цели:\n"
-    text += "\n".join(lines)
-
-    if year_revenue == 0:
-        text += "\n\n→ Залогай первую оплату: напиши 'HONOR $3000' или 'Pepsi $2000'"
-    elif avg_monthly < 5000:
-        needed = (target_yearly - year_revenue) / max(months_left, 1)
-        text += f"\n\nДо цели нужно ${needed:,.0f}/мес"
-
-    return text
+async def _add_follow_up(inp: dict) -> str:
+    conn = await _conn()
+    if not conn:
+        return json.dumps({"error": "DB unavailable"})
+    try:
+        next_fu = date.today() + timedelta(days=3)
+        await conn.execute(
+            """INSERT INTO follow_up_actions 
+               (contact, contact_handle, opportunity, potential_amount, last_interaction, next_follow_up)
+               VALUES ($1, $2, $3, $4, $5, $6)""",
+            inp["contact"], inp.get("handle", ""), inp["opportunity"],
+            inp.get("amount", 0), date.today(), next_fu
+        )
+        return json.dumps({"added": True, "next_follow_up": str(next_fu)}, default=str)
+    finally:
+        await conn.close()
 
 
-async def build_digest_section() -> str:
-    """
-    Compact revenue section for the morning digest.
-    One line with progress + who needs follow-up.
-    """
-    month_revenue = await get_monthly_revenue()
-    goals = await get_goals()
-    next_goal = goals[0] if goals else None
-    year_revenue = await get_year_revenue()
+async def _get_follow_ups() -> str:
+    conn = await _conn()
+    if not conn:
+        return json.dumps({"error": "DB unavailable"})
+    try:
+        rows = await conn.fetch("""
+            SELECT id, contact, contact_handle, opportunity, potential_amount,
+                   last_interaction, next_follow_up, times_skipped
+            FROM follow_up_actions 
+            WHERE status = 'pending' AND next_follow_up <= CURRENT_DATE
+            ORDER BY potential_amount DESC NULLS LAST LIMIT 5
+        """)
+        return json.dumps([dict(r) for r in rows], ensure_ascii=False, default=str)
+    finally:
+        await conn.close()
 
-    # Build mini progress toward next goal
-    if next_goal:
-        bar = progress_bar(min(year_revenue, next_goal.target_usd), next_goal.target_usd, width=8)
-        goal_text = f"{next_goal.emoji} {next_goal.name}: {bar}"
-    else:
-        goal_text = "Все цели достигнуты! 🎉"
 
-    text = f"💰 Март: ${month_revenue:,.0f} | {goal_text}"
-    return text
+async def _follow_up_action(inp: dict) -> str:
+    conn = await _conn()
+    if not conn:
+        return json.dumps({"error": "DB unavailable"})
+    try:
+        fid = inp["follow_up_id"]
+        action = inp["action"]
+        notes = inp.get("notes", "")
+
+        if action == "done":
+            await conn.execute(
+                """UPDATE follow_up_actions SET last_interaction = CURRENT_DATE,
+                   next_follow_up = CURRENT_DATE + 3, notes = COALESCE(notes||E'\n','')||$2
+                   WHERE id = $1""", fid, notes
+            )
+        elif action == "skip":
+            await conn.execute(
+                """UPDATE follow_up_actions SET next_follow_up = CURRENT_DATE + 7,
+                   times_skipped = times_skipped + 1 WHERE id = $1""", fid
+            )
+        elif action == "reject":
+            await conn.execute(
+                "UPDATE follow_up_actions SET status = 'rejected' WHERE id = $1", fid
+            )
+        elif action == "paid":
+            await conn.execute(
+                "UPDATE follow_up_actions SET status = 'paid' WHERE id = $1", fid
+            )
+
+        return json.dumps({"success": True, "action": action})
+    finally:
+        await conn.close()
+
+
+# ═══ Digest section ═══
+
+def _bar(current: float, target: float, w: int = 10) -> str:
+    ratio = min(current / target, 1.0) if target > 0 else 0
+    filled = int(ratio * w)
+    return "█" * filled + "░" * (w - filled)
+
+
+async def generate_digest_section() -> str:
+    """Generate 💰 section for morning digest."""
+    conn = await _conn()
+    if not conn:
+        return ""
+    try:
+        today = date.today()
+        month_start = today.replace(day=1)
+        year_start = today.replace(month=1, day=1)
+
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount), 0) as t FROM revenue_log WHERE date >= $1", month_start
+        )
+        monthly = float(row["t"])
+
+        row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount), 0) as t FROM revenue_log WHERE date >= $1", year_start
+        )
+        yearly = float(row["t"])
+
+        pct = int(monthly / MONTHLY_TARGET * 100) if MONTHLY_TARGET > 0 else 0
+        bar = _bar(monthly, MONTHLY_TARGET)
+        month_name = today.strftime("%B")
+
+        lines = [
+            f"💰 {month_name}: ${monthly:,.0f} / ${MONTHLY_TARGET:,.0f}",
+            f"   {bar} {pct}%",
+        ]
+
+        # Goals progress
+        savings = yearly * 0.3
+        cumulative = 0
+        for g in sorted(GOALS_2026, key=lambda x: x["priority"]):
+            cumulative += g["target"]
+            if savings >= cumulative:
+                lines.append(f"   {g['name']} — ✅")
+            else:
+                lines.append(f"   {g['name']} — ...")
+                break
+
+        # Follow-ups
+        fus = await conn.fetch("""
+            SELECT contact_handle, opportunity, potential_amount
+            FROM follow_up_actions 
+            WHERE status = 'pending' AND next_follow_up <= CURRENT_DATE
+            ORDER BY potential_amount DESC NULLS LAST LIMIT 3
+        """)
+        if fus:
+            lines.append("")
+            lines.append("   Ждут ответа:")
+            for fu in fus:
+                h = fu["contact_handle"] or "?"
+                h = f"@{h}" if h and not h.startswith("@") else h
+                opp = (fu["opportunity"] or "")[:25]
+                amt = f" ${fu['potential_amount']:,.0f}" if fu["potential_amount"] else ""
+                lines.append(f"   ▸ {h} ({opp}){amt}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Digest section error: {e}")
+        return ""
+    finally:
+        await conn.close()
