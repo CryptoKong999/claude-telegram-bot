@@ -62,13 +62,26 @@ def split_message(text: str, limit: int = config.TG_MSG_LIMIT) -> list[str]:
 
 async def send_long_message(message: Message, text: str):
     """Send a potentially long message, split into chunks."""
+    # Convert common markdown patterns to HTML for Telegram
+    import re
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<i>\1</i>', text)
+    text = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', text)
+    # Remove markdown headers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+
     chunks = split_message(text)
     for i, chunk in enumerate(chunks):
         try:
-            await message.answer(chunk, parse_mode=ParseMode.MARKDOWN)
+            await message.answer(chunk, parse_mode=ParseMode.HTML)
         except Exception:
-            # Markdown parsing failed — send as plain text
-            await message.answer(chunk)
+            # HTML parsing failed — send as plain text
+            try:
+                # Strip all HTML tags as fallback
+                clean = re.sub(r'<[^>]+>', '', chunk)
+                await message.answer(clean)
+            except Exception:
+                await message.answer(chunk)
 
 
 def model_short_name(model: str) -> str:

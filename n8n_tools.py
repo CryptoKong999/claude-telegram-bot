@@ -378,33 +378,94 @@ async def _get_executions(params: dict) -> str:
 
 async def _get_execution_detail(params: dict) -> str:
     ex_id = params["execution_id"]
-    result = await _n8n_request("GET", f"/executions/{ex_id}")
+    # includeData=true is REQUIRED to get node-level execution details
+    result = await _n8n_request("GET", f"/executions/{ex_id}", params={"includeData": "true"})
 
     if isinstance(result, dict) and "error" in result:
         return json.dumps(result)
 
-    # Summarize — full execution data can be massive
     if isinstance(result, dict):
-        data = result.get("data", result)
-        run_data = data.get("data", {}).get("resultData", {}).get("runData", {})
+        # n8n API can nest data differently depending on version
+        # Try multiple paths to find runData
+        run_data = None
+
+        # Path 1: result.data.resultData.runData (n8n cloud)
+        if isinstance(result.get("data"), dict):
+            rd = result["data"].get("resultData", {})
+            if isinstance(rd, dict):
+                run_data = rd.get("runData")
+
+        # Path 2: result.resultData.runData
+        if not run_data and isinstance(result.get("resultData"), dict):
+            run_data = result["resultData"].get("runData")
+
+        # Path 3: result.data.data.resultData.runData (double nested)
+        if not run_data and isinstance(result.get("data"), dict):
+            inner = result["data"].get("data", {})
+            if isinstance(inner, dict):
+                rd = inner.get("resultData", {})
+                if isinstance(rd, dict):
+                    run_data = rd.get("runData")
 
         node_results = {}
-        for node_name, runs in run_data.items() if isinstance(run_data, dict) else []:
-            if isinstance(runs, list) and runs:
-                last_run = runs[-1]
-                node_results[node_name] = {
-                    "status": "error" if last_run.get("error") else "success",
-                    "error": str(last_run.get("error", ""))[:200] if last_run.get("error") else None,
-                    "items_count": len(last_run.get("data", {}).get("main", [[]])[0])
-                        if isinstance(last_run.get("data", {}).get("main"), list) else 0,
-                }
+        if isinstance(run_data, dict):
+            for node_name, runs in run_data.items():
+                if isinstance(runs, list) and runs:
+                    last_run = runs[-1]
+                    error_info = last_run.get("error")
+
+                    # Extract input/output data for debugging
+                    node_data = {}
+                    main_data = last_run.get("data", {}).get("main", [])
+                    if isinstance(main_data, list) and main_data:
+                        first_set = main_data[0] if main_data else []
+                        if isinstance(first_set, list):
+                            node_data["items_count"] = len(first_set)
+                            # Include first item's keys for context
+                            if first_set:
+                                first_item = first_set[0]
+                                if isinstance(first_item, dict):
+                                    json_data = first_item.get("json", first_item)
+                                    if isinstance(json_data, dict):
+                                        node_data["first_item_keys"] = list(json_data.keys())[:10]
+                                        # Truncated preview of first item
+                                        preview = json.dumps(json_data, ensure_ascii=False, default=str)
+                                        node_data["first_item_preview"] = preview[:500]
+
+                    node_results[node_name] = {
+                        "status": "error" if error_info else "success",
+                        "error": None,
+                        "data": node_data,
+                        "executionTime": last_run.get("executionTime"),
+                    }
+
+                    if error_info:
+                        if isinstance(error_info, dict):
+                            node_results[node_name]["error"] = {
+                                "message": str(error_info.get("message", ""))[:500],
+                                "description": str(error_info.get("description", ""))[:500],
+                                "stack": str(error_info.get("stack", ""))[:300],
+                            }
+                        else:
+                            node_results[node_name]["error"] = str(error_info)[:500]
+
+        # Also extract the error node if flagged at top level
+        top_error = None
+        if isinstance(result.get("data"), dict):
+            re = result["data"].get("resultData", {})
+            if isinstance(re, dict) and re.get("error"):
+                top_error = str(re["error"])[:500]
 
         summary = {
-            "id": data.get("id"),
-            "status": data.get("status"),
-            "startedAt": data.get("startedAt"),
-            "stoppedAt": data.get("stoppedAt"),
+            "id": result.get("id"),
+            "status": result.get("status") or result.get("finished"),
+            "startedAt": result.get("startedAt"),
+            "stoppedAt": result.get("stoppedAt"),
+            "workflowName": result.get("workflowData", {}).get("name", "") if isinstance(result.get("workflowData"), dict) else "",
             "node_results": node_results,
+            "nodes_count": len(node_results),
+            "error_nodes": [k for k, v in node_results.items() if v.get("status") == "error"],
+            "top_level_error": top_error,
         }
         return json.dumps(summary, ensure_ascii=False, default=str)
 
