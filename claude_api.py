@@ -91,6 +91,18 @@ def get_tools(enable_web_search: bool = True, enable_n8n: bool = True) -> list[d
     if enable_n8n and config.N8N_API_URL and config.N8N_API_KEY:
         from n8n_tools import N8N_TOOLS
         tools.extend(N8N_TOOLS)
+
+    # DevOps tools — GitHub, Railway, Vercel
+    if config.GITHUB_TOKEN:
+        from devops_tools import DEVOPS_TOOLS
+        # Add only tools for configured services
+        for tool in DEVOPS_TOOLS:
+            if tool["name"].startswith("github_"):
+                tools.append(tool)
+            elif tool["name"].startswith("railway_") and config.RAILWAY_TOKEN:
+                tools.append(tool)
+            elif tool["name"].startswith("vercel_") and config.VERCEL_TOKEN:
+                tools.append(tool)
     return tools
 
 
@@ -98,6 +110,9 @@ async def _execute_tool_call(tool_name: str, tool_input: dict) -> str:
     """Route tool call to the right executor."""
     if tool_name.startswith("n8n_"):
         from n8n_tools import execute_tool
+        return await execute_tool(tool_name, tool_input)
+    if tool_name.startswith(("github_", "railway_", "vercel_")):
+        from devops_tools import execute_tool
         return await execute_tool(tool_name, tool_input)
     return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
@@ -193,9 +208,19 @@ async def chat(
                         logger.info(f"Tool call: {block.name}({json.dumps(block.input, ensure_ascii=False)[:200]})")
 
                         # Send status update if callback provided
-                        if status_callback and block.name.startswith("n8n_"):
-                            tool_label = block.name.replace("n8n_", "").replace("_", " ")
-                            await status_callback(f"⚙️ n8n: {tool_label}...")
+                        if status_callback:
+                            if block.name.startswith("n8n_"):
+                                tool_label = block.name.replace("n8n_", "").replace("_", " ")
+                                await status_callback(f"⚙️ n8n: {tool_label}...")
+                            elif block.name.startswith("github_"):
+                                tool_label = block.name.replace("github_", "").replace("_", " ")
+                                await status_callback(f"🐙 GitHub: {tool_label}...")
+                            elif block.name.startswith("railway_"):
+                                tool_label = block.name.replace("railway_", "").replace("_", " ")
+                                await status_callback(f"🚂 Railway: {tool_label}...")
+                            elif block.name.startswith("vercel_"):
+                                tool_label = block.name.replace("vercel_", "").replace("_", " ")
+                                await status_callback(f"▲ Vercel: {tool_label}...")
 
                         result = await _execute_tool_call(block.name, block.input)
 

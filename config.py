@@ -17,6 +17,16 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 N8N_API_URL = os.getenv("N8N_API_URL", "")  # e.g. https://xxx.app.n8n.cloud
 N8N_API_KEY = os.getenv("N8N_API_KEY", "")
 
+# === GitHub ===
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_OWNER = os.getenv("GITHUB_OWNER", "CryptoKong999")
+
+# === Railway ===
+RAILWAY_TOKEN = os.getenv("RAILWAY_TOKEN", "")
+
+# === Vercel ===
+VERCEL_TOKEN = os.getenv("VERCEL_TOKEN", "")
+
 # === Database ===
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -39,34 +49,34 @@ TG_FORMAT_RULES = (
     "- Respond in the same language the user writes in.\n"
 )
 
+# Import Robert's full context
+from context import ROBERT_CONTEXT
+
 # === System prompts (projects) ===
 SYSTEM_PROMPTS = {
     "default": (
-        TG_FORMAT_RULES +
-        "You are Claude, a helpful AI assistant. Be concise and direct."
+        TG_FORMAT_RULES + ROBERT_CONTEXT +
+        "\nBe concise and direct. You have access to n8n, GitHub, Railway, and Vercel tools."
     ),
     "code": (
-        TG_FORMAT_RULES +
-        "You are a senior software engineer. Write clean, production-ready code. "
+        TG_FORMAT_RULES + ROBERT_CONTEXT +
+        "\nFocus: senior software engineer mode. Write clean, production-ready code. "
         "Keep explanations minimal — code speaks for itself."
     ),
     "media": (
-        TG_FORMAT_RULES +
-        "Ты — креативный директор медиа-компании ZBS Media в Ташкенте. "
-        "Помогаешь с контент-стратегией, сценариями, идеями для подкастов, "
-        "новостных выпусков, коммерческих предложений. Будь конкретен и краток."
+        TG_FORMAT_RULES + ROBERT_CONTEXT +
+        "\nFocus: креативный директор ZBS Media. "
+        "Помогай с контент-стратегией, сценариями, идеями. Будь конкретен и краток."
     ),
     "business": (
-        TG_FORMAT_RULES +
-        "Ты — бизнес-консультант и стратег. Помогаешь с финансовым планированием, "
-        "коммерческими предложениями, переговорами, анализом рынка. "
+        TG_FORMAT_RULES + ROBERT_CONTEXT +
+        "\nFocus: бизнес-стратег. "
         "Давай конкретные цифры и рекомендации, а не общие слова. Коротко."
     ),
     "writer": (
-        TG_FORMAT_RULES +
-        "You are a professional writer and editor. Help with copywriting, "
-        "scripts, social media posts, articles. Match the tone and style "
-        "requested. Be creative and engaging."
+        TG_FORMAT_RULES + ROBERT_CONTEXT +
+        "\nFocus: professional writer and editor. "
+        "Match the tone and style requested. Be creative and engaging."
     ),
 }
 
