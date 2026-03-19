@@ -118,9 +118,9 @@ def build_pdf(p: dict) -> bytes:
         pdf.set_font(F, "B", 9)
         pdf.set_fill_color(41, 128, 185)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(55, 8, "  Услуга", fill=True)
-        pdf.cell(90, 8, "  Описание", fill=True)
-        pdf.cell(45, 8, "  Стоимость", fill=True, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(45, 8, "  Услуга", fill=True)
+        pdf.cell(80, 8, "  Описание", fill=True)
+        pdf.cell(65, 8, "  Стоимость", fill=True, new_x="LMARGIN", new_y="NEXT")
         # Rows
         pdf.set_font(F, "", 9)
         for i, s in enumerate(svcs):
@@ -131,9 +131,9 @@ def build_pdf(p: dict) -> bytes:
             ps = f"${pf:,}–{pt:,}" if pt > pf else f"${pf:,}"
             u = s.get("unit", "")
             if u: ps += f" {u}"
-            pdf.cell(55, 8, f"  {s.get('name','')[:28]}", fill=bg)
-            pdf.cell(90, 8, f"  {s.get('description','')[:52]}", fill=bg)
-            pdf.cell(45, 8, f"  {ps}", fill=bg, new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(45, 8, f"  {s.get('name','')[:22]}", fill=bg)
+            pdf.cell(80, 8, f"  {s.get('description','')[:42]}", fill=bg)
+            pdf.cell(65, 8, f"  {ps}", fill=bg, new_x="LMARGIN", new_y="NEXT")
         pdf.ln(5)
 
     # Packages
