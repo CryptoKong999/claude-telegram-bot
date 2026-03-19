@@ -1,28 +1,21 @@
 """
-Commercial proposal (КП) generator.
-Creates professional PDF proposals from client messages.
-Uses Claude to structure content, fpdf2 to render PDF.
+Commercial proposal generator with full Cyrillic support.
 """
-
-import json
-import io
-import logging
+import json, io, os, logging
 from datetime import date
-
 import httpx
 from fpdf import FPDF
-
 import config
 
 logger = logging.getLogger(__name__)
-
+FONT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 PROPOSAL_PROMPT = """Ты — коммерческий директор видеопродакшн-компании ООО ZBS PROD (Ташкент, Узбекистан).
 
 На основе запроса клиента составь коммерческое предложение.
 
 ЦЕНООБРАЗОВАНИЕ (рынок Ташкента 2026):
-— Новостной сюжет (1-2 мин): $300-500 (съёмка + монтаж + озвучка)
+— Новостной сюжет (1-2 мин): $300-500
 — Обзор объекта / имиджевый ролик (1-3 мин): $500-1,200
 — Репортаж с мероприятия (2-5 мин): $400-800
 — Рекламный ролик (30сек-1мин): $800-2,000
@@ -31,229 +24,179 @@ PROPOSAL_PROMPT = """Ты — коммерческий директор виде
 — Серия роликов (от 5 шт): скидка 10-15%
 — Абонемент (ежемесячно): скидка 15-20%
 
-В цену входит: пре-продакшн, съёмка, монтаж, цветокоррекция, 2 итерации правок.
-Не входит: аренда локации, реквизит, кастинг актёров (оценивается отдельно).
-
-ОТВЕТЬ СТРОГО В JSON формате:
+ОТВЕТЬ СТРОГО В JSON:
 {
-  "client_company": "название компании клиента",
-  "contact_person": "имя контактного лица если есть",
-  "intro": "короткое вступление (2-3 предложения)",
+  "client_company": "название",
+  "contact_person": "имя если есть",
+  "intro": "вступление НА РУССКОМ (2-3 предложения)",
   "services": [
-    {
-      "name": "название услуги",
-      "description": "краткое описание что входит (1-2 предложения)",
-      "price_from": 300,
-      "price_to": 500,
-      "unit": "за ролик"
-    }
+    {"name": "Услуга", "description": "Описание на русском", "price_from": 300, "price_to": 500, "unit": "за сюжет"}
   ],
   "packages": [
-    {
-      "name": "название пакета если релевантно",
-      "description": "описание",
-      "price": 1500,
-      "savings": "экономия 15%"
-    }
+    {"name": "Пакет", "description": "описание", "price_from": 2000, "price_to": 3500, "savings": "Экономия 15%"}
   ],
-  "total_note": "примечание об общей стоимости",
+  "total_note": "примечание НА РУССКОМ",
   "validity_days": 14
 }
 
-Если пакеты нерелевантны — оставь пустой массив.
-Цены должны быть обоснованы для рынка Ташкента.
-НЕ пиши ничего кроме JSON."""
+ВСЕ тексты НА РУССКОМ. Цены в USD. НЕ пиши ничего кроме JSON."""
 
 
 class ProposalPDF(FPDF):
-    """Custom PDF for commercial proposals."""
-
     def __init__(self):
         super().__init__()
-        # Use built-in fonts with latin encoding
-        # For Cyrillic we'll use DejaVu if available, otherwise fallback
         self.set_auto_page_break(auto=True, margin=25)
+        fp = os.path.join(FONT_DIR, "DejaVuSans.ttf")
+        fb = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+        if os.path.exists(fp):
+            self.add_font("DV", "", fp, uni=True)
+        if os.path.exists(fb):
+            self.add_font("DV", "B", fb, uni=True)
+        self.F = "DV" if os.path.exists(fp) else "Helvetica"
 
     def header(self):
-        self.set_font("Helvetica", "B", 20)
-        self.set_text_color(44, 62, 80)
-        self.cell(0, 12, "ZBS PROD", new_x="LMARGIN", new_y="NEXT", align="L")
-        self.set_font("Helvetica", "", 9)
-        self.set_text_color(127, 140, 141)
-        self.cell(0, 5, "OOO ZBS PROD | Tashkent, Uzbekistan", new_x="LMARGIN", new_y="NEXT")
-        self.cell(0, 5, "Tel: +998933263676 | Email: pr@creo.uz", new_x="LMARGIN", new_y="NEXT")
-        self.line(10, self.get_y() + 3, 200, self.get_y() + 3)
+        self.set_font(self.F, "B", 22)
+        self.set_text_color(41, 128, 185)
+        self.cell(0, 12, "ZBS PROD", new_x="LMARGIN", new_y="NEXT")
+        self.set_font(self.F, "", 9)
+        self.set_text_color(120, 120, 120)
+        self.cell(0, 5, "ООО ZBS PROD  |  Ташкент, Узбекистан", new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 5, "Тел: +998 93 326 36 76  |  Email: pr@creo.uz", new_x="LMARGIN", new_y="NEXT")
+        self.set_draw_color(41, 128, 185)
+        self.set_line_width(0.5)
+        self.line(10, self.get_y()+3, 200, self.get_y()+3)
         self.ln(8)
 
     def footer(self):
         self.set_y(-20)
-        self.set_font("Helvetica", "I", 8)
+        self.set_font(self.F, "", 7)
         self.set_text_color(170, 170, 170)
-        self.cell(0, 10, f"ZBS PROD | Commercial Proposal | Page {self.page_no()}", align="C")
+        self.cell(0, 10, f"ZBS PROD  •  Коммерческое предложение  •  Стр. {self.page_no()}", align="C")
 
 
-def transliterate(text: str) -> str:
-    """Transliterate Cyrillic to Latin for PDF compatibility."""
-    mapping = {
-        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo',
-        'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
-        'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
-        'ф': 'f', 'х': 'kh', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'shch',
-        'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
-        'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'Yo',
-        'Ж': 'Zh', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
-        'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
-        'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts', 'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch',
-        'Ъ': '', 'Ы': 'Y', 'Ь': '', 'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
-    }
-    return ''.join(mapping.get(c, c) for c in text)
-
-
-def safe_text(text: str) -> str:
-    """Make text safe for PDF rendering — transliterate if needed."""
-    try:
-        text.encode('latin-1')
-        return text
-    except UnicodeEncodeError:
-        return transliterate(text)
-
-
-def build_pdf(proposal: dict) -> bytes:
-    """Build a PDF from structured proposal data."""
+def build_pdf(p: dict) -> bytes:
     pdf = ProposalPDF()
     pdf.add_page()
-
+    F = pdf.F
     today = date.today().strftime("%d.%m.%Y")
 
     # Title
-    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_font(F, "B", 18)
     pdf.set_text_color(44, 62, 80)
-    pdf.cell(0, 10, "COMMERCIAL PROPOSAL", new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.ln(3)
+    pdf.cell(0, 12, "КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(5)
 
-    # Date and client
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(80, 80, 80)
-    pdf.cell(0, 6, f"Date: {today}", new_x="LMARGIN", new_y="NEXT")
-
-    client = proposal.get("client_company", "")
-    if client:
-        pdf.cell(0, 6, f"For: {safe_text(client)}", new_x="LMARGIN", new_y="NEXT")
-
-    contact = proposal.get("contact_person", "")
-    if contact:
-        pdf.cell(0, 6, f"Attn: {safe_text(contact)}", new_x="LMARGIN", new_y="NEXT")
-
+    # Meta
+    pdf.set_font(F, "", 10)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(95, 6, f"Дата: {today}")
+    pdf.cell(95, 6, f"Действительно: {p.get('validity_days',14)} дней", new_x="LMARGIN", new_y="NEXT", align="R")
+    if p.get("client_company"):
+        pdf.set_font(F, "B", 10)
+        pdf.set_text_color(60, 60, 60)
+        pdf.cell(0, 6, f"Для: {p['client_company']}", new_x="LMARGIN", new_y="NEXT")
+    if p.get("contact_person"):
+        pdf.set_font(F, "", 10)
+        pdf.cell(0, 6, f"Контактное лицо: {p['contact_person']}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
     # Intro
-    intro = proposal.get("intro", "")
-    if intro:
-        pdf.set_font("Helvetica", "", 10)
+    if p.get("intro"):
+        pdf.set_font(F, "", 10)
         pdf.set_text_color(60, 60, 60)
-        pdf.multi_cell(0, 6, safe_text(intro))
+        pdf.multi_cell(0, 6, p["intro"])
         pdf.ln(5)
 
-    # Services table
-    services = proposal.get("services", [])
-    if services:
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(44, 62, 80)
-        pdf.cell(0, 8, "SERVICES", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-
-        # Table header
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.set_fill_color(44, 62, 80)
+    # Services
+    svcs = p.get("services", [])
+    if svcs:
+        pdf.set_font(F, "B", 13)
+        pdf.set_text_color(41, 128, 185)
+        pdf.cell(0, 10, "УСЛУГИ", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+        # Header
+        pdf.set_font(F, "B", 9)
+        pdf.set_fill_color(41, 128, 185)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(70, 8, " Service", fill=True)
-        pdf.cell(75, 8, " Description", fill=True)
-        pdf.cell(45, 8, " Price (USD)", fill=True, new_x="LMARGIN", new_y="NEXT")
-
-        # Table rows
-        pdf.set_font("Helvetica", "", 9)
-        pdf.set_text_color(50, 50, 50)
-        for i, svc in enumerate(services):
-            fill = i % 2 == 0
-            if fill:
-                pdf.set_fill_color(245, 245, 245)
-
-            name = safe_text(svc.get("name", ""))
-            desc = safe_text(svc.get("description", ""))[:60]
-            price_from = svc.get("price_from", 0)
-            price_to = svc.get("price_to", 0)
-            unit = safe_text(svc.get("unit", ""))
-
-            price_str = f"${price_from:,}-{price_to:,} {unit}" if price_to > price_from else f"${price_from:,} {unit}"
-
-            pdf.cell(70, 7, f" {name[:35]}", fill=fill)
-            pdf.cell(75, 7, f" {desc}", fill=fill)
-            pdf.cell(45, 7, f" {price_str}", fill=fill, new_x="LMARGIN", new_y="NEXT")
-
+        pdf.cell(55, 8, "  Услуга", fill=True)
+        pdf.cell(90, 8, "  Описание", fill=True)
+        pdf.cell(45, 8, "  Стоимость", fill=True, new_x="LMARGIN", new_y="NEXT")
+        # Rows
+        pdf.set_font(F, "", 9)
+        for i, s in enumerate(svcs):
+            bg = i % 2 == 0
+            if bg: pdf.set_fill_color(240, 245, 250)
+            pdf.set_text_color(50, 50, 50)
+            pf, pt = s.get("price_from", 0), s.get("price_to", 0)
+            ps = f"${pf:,}–{pt:,}" if pt > pf else f"${pf:,}"
+            u = s.get("unit", "")
+            if u: ps += f" {u}"
+            pdf.cell(55, 8, f"  {s.get('name','')[:28]}", fill=bg)
+            pdf.cell(90, 8, f"  {s.get('description','')[:52]}", fill=bg)
+            pdf.cell(45, 8, f"  {ps}", fill=bg, new_x="LMARGIN", new_y="NEXT")
         pdf.ln(5)
 
     # Packages
-    packages = proposal.get("packages", [])
-    if packages:
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(44, 62, 80)
-        pdf.cell(0, 8, "PACKAGES", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-
-        for pkg in packages:
-            pdf.set_font("Helvetica", "B", 10)
+    pkgs = p.get("packages", [])
+    if pkgs:
+        pdf.set_font(F, "B", 13)
+        pdf.set_text_color(41, 128, 185)
+        pdf.cell(0, 10, "ПАКЕТНЫЕ ПРЕДЛОЖЕНИЯ", new_x="LMARGIN", new_y="NEXT")
+        for pk in pkgs:
+            pdf.set_font(F, "B", 11)
             pdf.set_text_color(44, 62, 80)
-            name = safe_text(pkg.get("name", ""))
-            pdf.cell(0, 7, f"{name}", new_x="LMARGIN", new_y="NEXT")
-
-            pdf.set_font("Helvetica", "", 9)
+            pdf.cell(0, 7, pk.get("name", ""), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font(F, "", 9)
             pdf.set_text_color(80, 80, 80)
-            desc = safe_text(pkg.get("description", ""))
-            pdf.multi_cell(0, 5, desc)
-
-            price = pkg.get("price", 0)
-            savings = safe_text(pkg.get("savings", ""))
-            pdf.set_font("Helvetica", "B", 10)
+            pdf.multi_cell(0, 5, pk.get("description", ""))
+            pf = pk.get("price_from", pk.get("price", 0))
+            pt = pk.get("price_to", 0)
+            sv = pk.get("savings", "")
+            pdf.set_font(F, "B", 11)
             pdf.set_text_color(39, 174, 96)
-            pdf.cell(0, 7, f"${price:,} ({savings})", new_x="LMARGIN", new_y="NEXT")
+            txt = f"${pf:,}–{pt:,}" if pt > pf else f"от ${pf:,}" if pf else ""
+            if sv: txt += f"  ({sv})"
+            if txt: pdf.cell(0, 7, txt, new_x="LMARGIN", new_y="NEXT")
             pdf.ln(3)
 
-    # Notes
-    pdf.ln(5)
-    pdf.set_font("Helvetica", "I", 9)
-    pdf.set_text_color(120, 120, 120)
-
-    total_note = safe_text(proposal.get("total_note", ""))
-    if total_note:
-        pdf.multi_cell(0, 5, total_note)
-        pdf.ln(2)
-
-    validity = proposal.get("validity_days", 14)
-    pdf.cell(0, 5, f"This proposal is valid for {validity} days from the date above.", new_x="LMARGIN", new_y="NEXT")
+    # Conditions
     pdf.ln(3)
-    pdf.cell(0, 5, "Price includes: pre-production, filming, editing, color correction, 2 revision rounds.", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 5, "Not included: location rental, props, casting (quoted separately).", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(F, "B", 13)
+    pdf.set_text_color(41, 128, 185)
+    pdf.cell(0, 10, "УСЛОВИЯ", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(F, "B", 9)
+    pdf.set_text_color(60, 60, 60)
+    pdf.cell(0, 6, "В стоимость входит:", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(F, "", 9)
+    for t in ["Пре-продакшн и подготовка", "Профессиональная съёмка", "Монтаж и цветокоррекция", "2 итерации правок"]:
+        pdf.cell(0, 5, f"  ✓  {t}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    pdf.set_font(F, "B", 9)
+    pdf.cell(0, 6, "Оценивается отдельно:", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(F, "", 9)
+    for t in ["Аренда локации", "Реквизит и декорации", "Кастинг актёров"]:
+        pdf.cell(0, 5, f"  •  {t}", new_x="LMARGIN", new_y="NEXT")
+
+    if p.get("total_note"):
+        pdf.ln(5)
+        pdf.set_font(F, "", 9)
+        pdf.set_text_color(100, 100, 100)
+        pdf.multi_cell(0, 5, p["total_note"])
 
     # Contact
-    pdf.ln(10)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_text_color(44, 62, 80)
-    pdf.cell(0, 7, "CONTACT", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 9)
-    pdf.set_text_color(80, 80, 80)
-    pdf.cell(0, 5, "OOO ZBS PROD", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 5, "Phone: +998933263676", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 5, "Email: pr@creo.uz", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 5, "Tashkent, Uzbekistan", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(8)
+    pdf.set_font(F, "B", 13)
+    pdf.set_text_color(41, 128, 185)
+    pdf.cell(0, 10, "КОНТАКТЫ", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font(F, "", 10)
+    pdf.set_text_color(60, 60, 60)
+    for line in ["ООО ZBS PROD", "Тел: +998 93 326 36 76", "Email: pr@creo.uz", "Ташкент, Узбекистан"]:
+        pdf.cell(0, 6, line, new_x="LMARGIN", new_y="NEXT")
 
     return pdf.output()
 
 
 async def generate_proposal(client_message: str) -> tuple[bytes, dict]:
-    """
-    Generate a commercial proposal PDF from a client message.
-    Returns: (pdf_bytes, proposal_data)
-    """
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             "https://api.anthropic.com/v1/messages",
@@ -266,19 +209,14 @@ async def generate_proposal(client_message: str) -> tuple[bytes, dict]:
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 2000,
                 "system": PROPOSAL_PROMPT,
-                "messages": [
-                    {"role": "user", "content": client_message}
-                ],
+                "messages": [{"role": "user", "content": client_message}],
             },
         )
         resp.raise_for_status()
         data = resp.json()
         raw = data["content"][0]["text"].strip()
-
-        # Clean JSON
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-
         proposal = json.loads(raw)
         pdf_bytes = build_pdf(proposal)
         return pdf_bytes, proposal
