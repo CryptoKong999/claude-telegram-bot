@@ -158,11 +158,11 @@ def build_pdf(p: dict) -> bytes:
             pf = pk.get("price_from", pk.get("price", 0))
             pt = pk.get("price_to", 0)
             sv = pk.get("savings", "")
-            pdf.set_font(F, "B", 11)
+            pdf.set_font(F, "B", 10)
             pdf.set_text_color(39, 174, 96)
-            txt = f"${pf:,} – {pt:,}" if pt > pf else f"от ${pf:,}" if pf else ""
+            txt = f"${pf:,} – ${pt:,}" if pt > pf else f"от ${pf:,}" if pf else ""
             if sv: txt += f"  ({sv})"
-            if txt: pdf.cell(0, 7, txt, new_x="LMARGIN", new_y="NEXT")
+            if txt: pdf.cell(0, 8, txt, new_x="LMARGIN", new_y="NEXT")
             pdf.ln(3)
 
     # Conditions
