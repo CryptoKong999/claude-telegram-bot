@@ -450,64 +450,118 @@ async def cb_resume(callback: CallbackQuery):
 web_search_enabled: dict[int, bool] = {}  # user_id -> bool
 
 
+# ──────────────────── Message Buffer ──────────────────
+# Collects multiple messages (text, photos, docs, voice) 
+# and processes them together after 5 seconds of silence.
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class BufferedMessage:
+    texts: list = field(default_factory=list)
+    attachments: list = field(default_factory=list)
+    last_message: Message = None
+    timer_task: asyncio.Task = None
+
+
+_buffer: dict[int, BufferedMessage] = {}  # user_id -> buffer
+BUFFER_DELAY = 5  # seconds to wait for more messages
+
+
+async def _flush_buffer(user_id: int):
+    """Process all buffered messages together."""
+    buf = _buffer.pop(user_id, None)
+    if not buf or not buf.last_message:
+        return
+
+    # Combine all texts
+    combined_text = "\n".join(buf.texts) if buf.texts else ""
+    if not combined_text and buf.attachments:
+        combined_text = "Проанализируй эти файлы"
+
+    await process_text_message(
+        buf.last_message,
+        combined_text,
+        attachments=buf.attachments if buf.attachments else None,
+    )
+
+
+def _reset_timer(user_id: int):
+    """Reset the buffer flush timer."""
+    buf = _buffer.get(user_id)
+    if buf and buf.timer_task:
+        buf.timer_task.cancel()
+    if buf:
+        buf.timer_task = asyncio.create_task(_delayed_flush(user_id))
+
+
+async def _delayed_flush(user_id: int):
+    """Wait for silence then flush."""
+    await asyncio.sleep(BUFFER_DELAY)
+    await _flush_buffer(user_id)
+
+
+def _get_buffer(user_id: int, message: Message) -> BufferedMessage:
+    """Get or create buffer for user."""
+    if user_id not in _buffer:
+        _buffer[user_id] = BufferedMessage()
+    _buffer[user_id].last_message = message
+    return _buffer[user_id]
+
+
 # ──────────────────── Message handlers ────────────────
 
 @router.message(F.voice)
 async def handle_voice(message: Message):
-    """Handle voice messages — transcribe then send to Claude."""
+    """Buffer voice messages — transcribe and add to buffer."""
     if not is_owner(message):
         return
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    # Download voice
     file = await bot.get_file(message.voice.file_id)
     voice_data = io.BytesIO()
     await bot.download_file(file.file_path, voice_data)
 
-    # Transcribe
     transcription = await claude_api.transcribe_voice(voice_data.getvalue())
     if transcription.startswith("["):
         return await message.answer(transcription)
 
-    # Show what was recognized
-    await message.answer(f"🎤 _{transcription}_", parse_mode=ParseMode.MARKDOWN)
+    await message.answer(f"🎤 {transcription}")
 
-    # Send to Claude
-    await process_text_message(message, transcription)
+    buf = _get_buffer(message.from_user.id, message)
+    buf.texts.append(transcription)
+    _reset_timer(message.from_user.id)
 
 
 @router.message(F.photo)
 async def handle_photo(message: Message):
-    """Handle photos — send to Claude Vision."""
+    """Buffer photos."""
     if not is_owner(message):
         return
 
-    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
-    # Get largest photo
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     photo_data = io.BytesIO()
     await bot.download_file(file.file_path, photo_data)
 
-    # Convert to base64
     b64 = base64.b64encode(photo_data.getvalue()).decode("utf-8")
 
-    user_text = message.caption or "Что на этом изображении?"
-
-    attachments = [{
+    buf = _get_buffer(message.from_user.id, message)
+    buf.attachments.append({
         "type": "image",
         "media_type": "image/jpeg",
         "data": b64,
-    }]
-
-    await process_text_message(message, user_text, attachments=attachments)
+    })
+    if message.caption:
+        buf.texts.append(message.caption)
+    _reset_timer(message.from_user.id)
 
 
 @router.message(F.document)
 async def handle_document(message: Message):
-    """Handle documents — PDF via Vision, text files as text."""
+    """Buffer documents."""
     if not is_owner(message):
         return
 
@@ -515,57 +569,53 @@ async def handle_document(message: Message):
     mime = doc.mime_type or ""
     file_name = doc.file_name or "document"
 
-    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-
     file = await bot.get_file(doc.file_id)
     file_data = io.BytesIO()
     await bot.download_file(file.file_path, file_data)
     raw = file_data.getvalue()
 
-    user_text = message.caption or f"Проанализируй этот файл: {file_name}"
+    buf = _get_buffer(message.from_user.id, message)
 
     if mime == "application/pdf":
         b64 = base64.b64encode(raw).decode("utf-8")
-        attachments = [{
+        buf.attachments.append({
             "type": "document",
             "media_type": "application/pdf",
             "data": b64,
-        }]
-        await process_text_message(message, user_text, attachments=attachments)
-
+        })
     elif mime.startswith("image/"):
         b64 = base64.b64encode(raw).decode("utf-8")
-        attachments = [{
+        buf.attachments.append({
             "type": "image",
             "media_type": mime,
             "data": b64,
-        }]
-        await process_text_message(message, user_text, attachments=attachments)
-
-    elif mime.startswith("text/") or file_name.endswith((".py", ".js", ".json", ".md", ".txt", ".csv", ".html", ".css", ".yaml", ".yml", ".toml", ".sh", ".sql")):
-        # Text file — include content in message
+        })
+    elif mime.startswith("text/") or file_name.endswith(
+        (".py", ".js", ".json", ".md", ".txt", ".csv", ".html", ".css", ".yaml", ".yml", ".toml", ".sh", ".sql")
+    ):
         try:
             text_content = raw.decode("utf-8")
         except UnicodeDecodeError:
             text_content = raw.decode("latin-1")
-
-        full_text = f"{user_text}\n\n```\n{text_content}\n```"
-        await process_text_message(message, full_text)
-
+        buf.texts.append(f"Файл {file_name}:\n```\n{text_content}\n```")
     else:
-        await message.answer(
-            f"⚠️ Формат `{mime}` пока не поддерживается.\n"
-            "Поддерживаются: фото, PDF, текстовые файлы.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await message.answer(f"⚠️ Формат {mime} пока не поддерживается.")
+        return
+
+    if message.caption:
+        buf.texts.append(message.caption)
+    _reset_timer(message.from_user.id)
 
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
-    """Handle plain text messages."""
+    """Buffer text messages."""
     if not is_owner(message):
         return
-    await process_text_message(message, message.text)
+
+    buf = _get_buffer(message.from_user.id, message)
+    buf.texts.append(message.text)
+    _reset_timer(message.from_user.id)
 
 
 async def process_text_message(
